@@ -8,6 +8,7 @@
 set -euo pipefail
 
 HTTP_PORT="${HTTP_PORT:-8000}"
+UPSTREAM_HTTP_PORT="${UPSTREAM_HTTP_PORT:-18000}"
 DYN_FILE_KV="${DYN_FILE_KV:-/var/lib/dynamo/file-kv}"
 MOCK_SPEEDUP="${MOCK_SPEEDUP:-100000}"
 
@@ -68,10 +69,18 @@ pids+=("$!")
 sleep 0.5
 
 # Prefer env (DYN_*) for event plane so both PyPI 1.0.x and newer releases behave consistently.
+# Frontend binds to an internal port; a lightweight proxy on HTTP_PORT applies request compatibility patches.
 python3 -m dynamo.frontend \
-  --http-port "${HTTP_PORT}" \
+  --http-port "${UPSTREAM_HTTP_PORT}" \
   --discovery-backend "${DYN_DISCOVERY_BACKEND}" \
   --router-mode "${ROUTER_MODE:-round-robin}" &
+pids+=("$!")
+
+# Start compatibility proxy:
+# - strips top-level include_usage for non-stream chat requests
+# - transparently forwards all other requests
+PROXY_PORT="${HTTP_PORT}" UPSTREAM_PORT="${UPSTREAM_HTTP_PORT}" \
+  python3 /opt/dynamo-mocker-vllm/request_proxy.py &
 pids+=("$!")
 
 # Let the frontend bind before workers register.

@@ -51,6 +51,7 @@ RUN M=$(python -c "import dynamo.mocker, pathlib; print(pathlib.Path(dynamo.mock
 WORKDIR /opt/dynamo-mocker-vllm
 
 COPY examples/backends/mocker/docker/entrypoint.bash /opt/dynamo-mocker-vllm/entrypoint.bash
+COPY examples/backends/mocker/docker/request_proxy.py /opt/dynamo-mocker-vllm/request_proxy.py
 RUN chmod +x /opt/dynamo-mocker-vllm/entrypoint.bash
 
 EXPOSE 8000
