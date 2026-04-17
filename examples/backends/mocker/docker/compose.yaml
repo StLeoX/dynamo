@@ -17,6 +17,9 @@ services:
     image: dynamo-mocker-http:local
     ports:
       - "${HTTP_PORT:-8000}:8000"
+      # Mock LoRA admin (one port per default model: 1.5B -> 8001, 7B -> 8002). Override base via MOCKER_MOCK_LORA_ADMIN_PORT_BASE.
+      - "8001:8001"
+      - "8002:8002"
     environment:
       HTTP_PORT: "8000"
       HF_TOKEN: "${HF_TOKEN:-}"
@@ -25,3 +28,5 @@ services:
       # Space-separated HF model ids to mock (default entrypoint uses two DeepSeek distill models).
       MOCKER_MODELS: "${MOCKER_MODELS:-}"
       MOCKER_EXTRA_ARGS: "${MOCKER_EXTRA_ARGS:-}"
+      # Per-model mock LoRA HTTP (load/unload); entrypoint defaults to 1 if unset.
+      MOCKER_DYNAMIC_LORA_ADMIN: "${MOCKER_DYNAMIC_LORA_ADMIN:-1}"
