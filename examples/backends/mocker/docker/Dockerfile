@@ -4,7 +4,7 @@
 # Slim CPU image: OpenAI HTTP frontend + one or more vLLM-style mocker workers (no vLLM / no GPU).
 #
 # Build from repository root:
-#   docker build -f examples/backends/mocker/docker/Dockerfile -t dynamo-mocker-http:local .
+#   docker build -f examples/backends/mocker/docker/Dockerfile -t dynamo-mocker-vllm:local .
 #
 # Or: docker compose -f examples/backends/mocker/docker/compose.yaml build
 
@@ -48,10 +48,10 @@ RUN M=$(python -c "import dynamo.mocker, pathlib; print(pathlib.Path(dynamo.mock
     && python3 /tmp/mock-lora/apply_mock_lora_patch.py \
     && rm -rf /tmp/mock-lora
 
-WORKDIR /opt/dynamo-mocker-http
+WORKDIR /opt/dynamo-mocker-vllm
 
-COPY examples/backends/mocker/docker/entrypoint.bash /opt/dynamo-mocker-http/entrypoint.bash
-RUN chmod +x /opt/dynamo-mocker-http/entrypoint.bash
+COPY examples/backends/mocker/docker/entrypoint.bash /opt/dynamo-mocker-vllm/entrypoint.bash
+RUN chmod +x /opt/dynamo-mocker-vllm/entrypoint.bash
 
 EXPOSE 8000
 # When MOCKER_MOCK_LORA_ADMIN_PORT is set (see entrypoint), first worker uses this port, then +1 per model.
@@ -60,4 +60,4 @@ EXPOSE 8001
 HEALTHCHECK --interval=15s --timeout=5s --retries=20 --start-period=120s \
     CMD curl -sf "http://127.0.0.1:${HTTP_PORT:-8000}/v1/models" | grep -q '"id"' || exit 1
 
-ENTRYPOINT ["/opt/dynamo-mocker-http/entrypoint.bash"]
+ENTRYPOINT ["/opt/dynamo-mocker-vllm/entrypoint.bash"]

@@ -12,14 +12,14 @@
 在仓库根目录执行：
 
 ```bash
-docker build -f examples/backends/mocker/docker/Dockerfile -t dynamo-mocker-http:local .
+docker build -f examples/backends/mocker/docker/Dockerfile -t dynamo-mocker-vllm:local .
 ```
 
 可选：覆盖 PyPI 版本（仓库开发版可能领先于 PyPI）：
 
 ```bash
 docker build -f examples/backends/mocker/docker/Dockerfile \
-  --build-arg AI_DYNAMO_VERSION=1.0.1 -t dynamo-mocker-http:local .
+  --build-arg AI_DYNAMO_VERSION=1.0.1 -t dynamo-mocker-vllm:local .
 ```
 
 ## 运行
@@ -27,7 +27,7 @@ docker build -f examples/backends/mocker/docker/Dockerfile \
 ```bash
 docker run --rm -p 8000:8000 \
   -e HF_TOKEN="$HF_TOKEN" \
-  dynamo-mocker-http:local
+  dynamo-mocker-vllm:local
 ```
 
 或使用 Compose（同样在仓库根目录）：
