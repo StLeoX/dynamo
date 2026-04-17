@@ -37,12 +37,25 @@ ENV PYTHONUNBUFFERED=1 \
 RUN python -m pip install --upgrade pip \
     && pip install "ai-dynamo==${AI_DYNAMO_VERSION}"
 
+# Optional mock LoRA admin: add only ``mock_lora_http.py`` + patch the *installed* ``main.py``.
+# Do not copy the whole git ``dynamo.mocker`` tree onto an older ``ai-dynamo`` wheel — API
+# drift (e.g. MockEngineArgs / create_runtime) breaks imports.
+COPY components/src/dynamo/mocker/mock_lora_http.py \
+    examples/backends/mocker/docker/apply_mock_lora_patch.py \
+    /tmp/mock-lora/
+RUN M=$(python -c "import dynamo.mocker, pathlib; print(pathlib.Path(dynamo.mocker.__file__).parent)") \
+    && install -m0644 /tmp/mock-lora/mock_lora_http.py "${M}/" \
+    && python3 /tmp/mock-lora/apply_mock_lora_patch.py \
+    && rm -rf /tmp/mock-lora
+
 WORKDIR /opt/dynamo-mocker-http
 
 COPY examples/backends/mocker/docker/entrypoint.bash /opt/dynamo-mocker-http/entrypoint.bash
 RUN chmod +x /opt/dynamo-mocker-http/entrypoint.bash
 
 EXPOSE 8000
+# When MOCKER_MOCK_LORA_ADMIN_PORT is set (see entrypoint), first worker uses this port, then +1 per model.
+EXPOSE 8001
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=20 --start-period=120s \
     CMD curl -sf "http://127.0.0.1:${HTTP_PORT:-8000}/v1/models" | grep -q '"id"' || exit 1

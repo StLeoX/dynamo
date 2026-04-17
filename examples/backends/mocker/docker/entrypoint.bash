@@ -19,6 +19,16 @@ MODEL_2="${MODEL_2:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}"
 # Example: MOCKER_MODELS="org/A org/B"
 MOCKER_MODELS="${MOCKER_MODELS:-}"
 
+# Optional: in-process mock LoRA admin (POST /v1/load_lora_adapter, /v1/unload_lora_adapter).
+# Default ON for this image: each mocker process gets MOCKER_MOCK_LORA_ADMIN_PORT starting at
+# MOCKER_MOCK_LORA_ADMIN_PORT_BASE (8001), +1 per model. Set MOCKER_DYNAMIC_LORA_ADMIN=0 to disable.
+MOCKER_DYNAMIC_LORA_ADMIN="${MOCKER_DYNAMIC_LORA_ADMIN:-1}"
+MOCKER_MOCK_LORA_ADMIN_PORT_BASE="${MOCKER_MOCK_LORA_ADMIN_PORT_BASE:-8001}"
+if [[ "${MOCKER_DYNAMIC_LORA_ADMIN}" == "1" ]]; then
+  export MOCKER_MOCK_LORA_ADMIN_HOST="${MOCKER_MOCK_LORA_ADMIN_HOST:-0.0.0.0}"
+  echo "[entrypoint] mock LoRA admin enabled (per-model ports from ${MOCKER_MOCK_LORA_ADMIN_PORT_BASE})"
+fi
+
 export DYN_DISCOVERY_BACKEND="${DYN_DISCOVERY_BACKEND:-file}"
 export DYN_FILE_KV
 # ai-dynamo 1.0.x mocker still expects a reachable NATS by default; ship nats-server in-image.
@@ -73,8 +83,13 @@ if [[ -n "${MOCKER_EXTRA_ARGS:-}" ]]; then
   extra_mocker=( ${MOCKER_EXTRA_ARGS} )
 fi
 
+_lora_admin_port="${MOCKER_MOCK_LORA_ADMIN_PORT_BASE}"
 for m in "${models[@]}"; do
   echo "[entrypoint] starting mocker for ${m}"
+  if [[ "${MOCKER_DYNAMIC_LORA_ADMIN}" == "1" ]]; then
+    export MOCKER_MOCK_LORA_ADMIN_PORT="${_lora_admin_port}"
+    _lora_admin_port=$((_lora_admin_port + 1))
+  fi
   python3 -m dynamo.mocker \
     --discovery-backend "${DYN_DISCOVERY_BACKEND}" \
     --model-path "${m}" \
