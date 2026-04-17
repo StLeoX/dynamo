@@ -23,21 +23,22 @@ UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "127.0.0.1")
 UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "18000"))
 
 
-def _strip_include_usage(path: str, body: bytes, content_type: str) -> bytes:
+def _strip_include_usage(path: str, body: bytes, content_type: str) -> tuple[bytes, bool]:
     if path.split("?", 1)[0] != "/v1/chat/completions":
-        return body
+        return body, False
     if "application/json" not in (content_type or "").lower():
-        return body
+        return body, False
     if not body:
-        return body
+        return body, False
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return body
-    if isinstance(payload, dict) and payload.get("stream") is False:
+        return body, False
+    if isinstance(payload, dict) and not bool(payload.get("stream", False)):
+        had_include_usage = "include_usage" in payload
         payload.pop("include_usage", None)
-        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    return body
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8"), had_include_usage
+    return body, False
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -49,7 +50,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _proxy(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(content_length) if content_length > 0 else b""
-        request_body = _strip_include_usage(
+        request_body, stripped_include_usage = _strip_include_usage(
             self.path, request_body, self.headers.get("Content-Type", "")
         )
 
@@ -72,9 +73,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_response(resp.status, resp.reason)
         for key, value in resp.getheaders():
             key_lower = key.lower()
-            if key_lower in ("transfer-encoding", "connection"):
+            if key_lower in ("transfer-encoding", "connection", "content-length"):
                 continue
             self.send_header(key, value)
+        self.send_header(
+            "X-Dynamo-Proxy-Include-Usage-Stripped",
+            "true" if stripped_include_usage else "false",
+        )
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         if data:
