@@ -55,8 +55,7 @@ COPY examples/backends/mocker/docker/request_proxy.py /opt/dynamo-mocker-vllm/re
 RUN chmod +x /opt/dynamo-mocker-vllm/entrypoint.bash
 
 EXPOSE 8000
-# When MOCKER_MOCK_LORA_ADMIN_PORT is set (see entrypoint), first worker uses this port, then +1 per model.
-EXPOSE 8001
+# Mock LoRA for additional workers binds 8001+ inside the container; request_proxy forwards load/unload to 8002 on :8000 only.
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=20 --start-period=120s \
     CMD curl -sf "http://127.0.0.1:${HTTP_PORT:-8000}/v1/models" | grep -q '"id"' || exit 1

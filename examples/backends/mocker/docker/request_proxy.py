@@ -7,6 +7,11 @@
 Current compatibility behavior:
 - For POST /v1/chat/completions requests where JSON body contains `stream: false`,
   remove top-level `include_usage` before forwarding to dynamo.frontend.
+- Mock LoRA admin (``POST /v1/load_lora_adapter``, ``POST /v1/unload_lora_adapter``)
+  is forwarded to ``UPSTREAM_HOST`` on ``_MOCK_LORA_MERGED_UPSTREAM_PORT`` (default
+  ``8002``, the second worker with default ``MOCKER_MOCK_LORA_ADMIN_PORT_BASE=8001``).
+  There is no per-request switch; use the first worker’s admin only by changing that
+  constant or hitting port 8001 inside the container.
 """
 
 from __future__ import annotations
@@ -21,6 +26,20 @@ LISTEN_HOST = os.environ.get("PROXY_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("PROXY_PORT", "8000"))
 UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "127.0.0.1")
 UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "18000"))
+
+# Second mocker worker’s in-container mock LoRA HTTP (see entrypoint: base + 1).
+_MOCK_LORA_MERGED_UPSTREAM_PORT = 8002
+_LORA_ADMIN_PATHS = frozenset({"/v1/load_lora_adapter", "/v1/unload_lora_adapter"})
+
+
+def _path_without_query(path: str) -> str:
+    return path.split("?", 1)[0]
+
+
+def _upstream_port_for_request(path: str) -> int:
+    if _path_without_query(path) in _LORA_ADMIN_PATHS:
+        return _MOCK_LORA_MERGED_UPSTREAM_PORT
+    return UPSTREAM_PORT
 
 
 def _strip_include_usage(path: str, body: bytes, content_type: str) -> tuple[bytes, bool]:
@@ -57,7 +76,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}
         headers["Content-Length"] = str(len(request_body))
 
-        conn = client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=120)
+        port = _upstream_port_for_request(self.path)
+        conn = client.HTTPConnection(UPSTREAM_HOST, port, timeout=120)
         try:
             conn.request(
                 self.command,

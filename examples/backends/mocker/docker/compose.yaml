@@ -17,9 +17,6 @@ services:
     image: dynamo-mocker-vllm:local
     ports:
       - "${HTTP_PORT:-8000}:8000"
-      # Mock LoRA admin (one port per default model: 1.5B -> 8001, 7B -> 8002). Override base via MOCKER_MOCK_LORA_ADMIN_PORT_BASE.
-      - "8001:8001"
-      - "8002:8002"
     environment:
       HTTP_PORT: "8000"
       HF_TOKEN: "${HF_TOKEN:-}"
