@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Push Mocker SGLang to GHCR (amd64 source build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ghcr_owner:
+        description: "GHCR owner (user/org), e.g. faust-benchou"
+        required: true
+        type: string
+      image_name:
+        description: "Image name in GHCR"
+        required: false
+        default: "dynamo-mocker-sglang"
+        type: string
+      image_tag:
+        description: "Image tag, e.g. 2026-04-23"
+        required: true
+        type: string
+      ai_dynamo_version:
+        description: "Used only when AI_DYNAMO_INSTALL_SOURCE=0 (kept for compatibility)"
+        required: false
+        default: "1.0.1"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build amd64 from source and push
+    runs-on: ubuntu-latest
+    env:
+      BUILD_PLATFORM: linux/amd64
+      AI_DYNAMO_INSTALL_SOURCE: "1"
+      GHCR_OWNER: ${{ inputs.ghcr_owner }}
+      GHCR_IMAGE_NAME: ${{ inputs.image_name }}
+      VERSION: ${{ inputs.image_tag }}
+      AI_DYNAMO_VERSION: ${{ inputs.ai_dynamo_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare image refs
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_IMAGE="${GHCR_IMAGE_NAME}:local"
+          DEST="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
+          echo "source_image=${SOURCE_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "dest=${DEST}" >> "$GITHUB_OUTPUT"
+          echo "build_platform=${BUILD_PLATFORM}" >> "$GITHUB_OUTPUT"
+
+      - name: Build local image (amd64, source install)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform "${{ steps.prep.outputs.build_platform }}" \
+            -f examples/backends/mocker/docker/Dockerfile \
+            --build-arg "AI_DYNAMO_VERSION=${AI_DYNAMO_VERSION}" \
+            --build-arg "AI_DYNAMO_INSTALL_SOURCE=${AI_DYNAMO_INSTALL_SOURCE}" \
+            -t "${{ steps.prep.outputs.source_image }}" \
+            --load \
+            .
+
+      - name: Login to GHCR (GHCR_TOKEN first, fallback GITHUB_TOKEN)
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TOKEN="${GHCR_TOKEN:-$GITHUB_TOKEN}"
+          if [[ -z "${TOKEN}" ]]; then
+            echo "No token available for GHCR login." >&2
+            exit 1
+          fi
+          printf '%s' "${TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Tag and push image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker tag "${{ steps.prep.outputs.source_image }}" "${{ steps.prep.outputs.dest }}"
+          docker push "${{ steps.prep.outputs.dest }}"
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          {
+            echo "### GHCR Image Published"
+            echo ""
+            echo "- Source image: \`${{ steps.prep.outputs.source_image }}\`"
+            echo "- Platform: \`${{ steps.prep.outputs.build_platform }}\`"
+            echo "- Source install: \`${AI_DYNAMO_INSTALL_SOURCE}\`"
+            echo "- Pushed image: \`${{ steps.prep.outputs.dest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
