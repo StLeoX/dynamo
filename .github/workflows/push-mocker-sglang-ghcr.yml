@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       ai_dynamo_version:
-        description: "Used only when AI_DYNAMO_INSTALL_SOURCE=0 (kept for compatibility)"
+        description: "Compatibility arg for wheel mode only; this workflow defaults to source build (AI_DYNAMO_INSTALL_SOURCE=1)"
         required: false
         default: "1.0.1"
         type: string
@@ -52,8 +52,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -f "examples/backends/mocker/docker/Dockerfile" ]]; then
+            REPO_ROOT="."
+          elif [[ -f "dynamo/examples/backends/mocker/docker/Dockerfile" ]]; then
+            REPO_ROOT="dynamo"
+          else
+            echo "Cannot find examples/backends/mocker/docker/Dockerfile in workspace." >&2
+            echo "Workspace tree (top level):" >&2
+            ls -la >&2
+            exit 1
+          fi
           SOURCE_IMAGE="${GHCR_IMAGE_NAME}:local"
           DEST="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
+          echo "repo_root=${REPO_ROOT}" >> "$GITHUB_OUTPUT"
           echo "source_image=${SOURCE_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "dest=${DEST}" >> "$GITHUB_OUTPUT"
           echo "build_platform=${BUILD_PLATFORM}" >> "$GITHUB_OUTPUT"
@@ -64,12 +75,12 @@ jobs:
           set -euo pipefail
           docker buildx build \
             --platform "${{ steps.prep.outputs.build_platform }}" \
-            -f examples/backends/mocker/docker/Dockerfile \
+            -f "${{ steps.prep.outputs.repo_root }}/examples/backends/mocker/docker/Dockerfile" \
             --build-arg "AI_DYNAMO_VERSION=${AI_DYNAMO_VERSION}" \
             --build-arg "AI_DYNAMO_INSTALL_SOURCE=${AI_DYNAMO_INSTALL_SOURCE}" \
             -t "${{ steps.prep.outputs.source_image }}" \
             --load \
-            .
+            "${{ steps.prep.outputs.repo_root }}"
 
       - name: Login to GHCR (GHCR_TOKEN first, fallback GITHUB_TOKEN)
         shell: bash
