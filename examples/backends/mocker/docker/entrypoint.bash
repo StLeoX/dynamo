@@ -4,31 +4,24 @@
 #
 # Starts nats-server (in-process sidecar), dynamo.frontend, and N dynamo.mocker workers using
 # file discovery (no etcd). Chat requests must include "max_tokens" (mocker requires it).
+# Single published HTTP port (default 30000): OpenAI routes + GET /metrics (SGLang-style text).
 
 set -euo pipefail
 
-HTTP_PORT="${HTTP_PORT:-8000}"
+HTTP_PORT="${HTTP_PORT:-30000}"
 UPSTREAM_HTTP_PORT="${UPSTREAM_HTTP_PORT:-18000}"
 DYN_FILE_KV="${DYN_FILE_KV:-/var/lib/dynamo/file-kv}"
 MOCK_SPEEDUP="${MOCK_SPEEDUP:-100000}"
+MOCKER_ENGINE_TYPE="${MOCKER_ENGINE_TYPE:-sglang}"
 
-# Default: two DeepSeek distill Qwen mockers (HF id used for tokenizer + served model name).
+# Default: three models for multi-registration (HF id used for tokenizer + served model name).
 MODEL_1="${MODEL_1:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 MODEL_2="${MODEL_2:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}"
+MODEL_3="${MODEL_3:-Qwen/Qwen3-8B}"
 
-# Space-separated HuggingFace model ids; overrides MODEL_1 / MODEL_2 when set.
+# Space-separated HuggingFace model ids; overrides MODEL_1 / MODEL_2 / MODEL_3 when set.
 # Example: MOCKER_MODELS="org/A org/B"
 MOCKER_MODELS="${MOCKER_MODELS:-}"
-
-# Optional: in-process mock LoRA admin (POST /v1/load_lora_adapter, /v1/unload_lora_adapter).
-# Default ON for this image: each mocker process gets MOCKER_MOCK_LORA_ADMIN_PORT starting at
-# MOCKER_MOCK_LORA_ADMIN_PORT_BASE (8001), +1 per model. Set MOCKER_DYNAMIC_LORA_ADMIN=0 to disable.
-MOCKER_DYNAMIC_LORA_ADMIN="${MOCKER_DYNAMIC_LORA_ADMIN:-1}"
-MOCKER_MOCK_LORA_ADMIN_PORT_BASE="${MOCKER_MOCK_LORA_ADMIN_PORT_BASE:-8001}"
-if [[ "${MOCKER_DYNAMIC_LORA_ADMIN}" == "1" ]]; then
-  export MOCKER_MOCK_LORA_ADMIN_HOST="${MOCKER_MOCK_LORA_ADMIN_HOST:-0.0.0.0}"
-  echo "[entrypoint] mock LoRA admin enabled (per-model ports from ${MOCKER_MOCK_LORA_ADMIN_PORT_BASE})"
-fi
 
 export DYN_DISCOVERY_BACKEND="${DYN_DISCOVERY_BACKEND:-file}"
 export DYN_FILE_KV
@@ -38,14 +31,25 @@ export NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 export DYN_EVENT_PLANE="${DYN_EVENT_PLANE:-nats}"
 export HF_HOME="${HF_HOME:-/root/.cache/huggingface}"
 
+# Must match worker namespace (see dynamo.common.utils.namespace.get_worker_namespace).
+MOCKER_NAMESPACE="${DYN_NAMESPACE:-dynamo}"
+
 mkdir -p "${DYN_FILE_KV}" "${HF_HOME}"
+
+# Stable short id for unique Dynamo endpoint names (EndpointId has no per-instance field).
+_mocker_endpoint_suffix() {
+  printf '%s' "$1" | sha256sum | awk '{print substr($1,1,16)}'
+}
 
 if [[ -n "${MOCKER_MODELS// }" ]]; then
   # shellcheck disable=SC2206
   models=( ${MOCKER_MODELS} )
 else
-  models=( "${MODEL_1}" "${MODEL_2}" )
+  models=( "${MODEL_1}" "${MODEL_2}" "${MODEL_3}" )
 fi
+
+# Same list for request_proxy GET /metrics (space-separated).
+export MOCKER_METRICS_MODELS="${models[*]}"
 
 pids=()
 
@@ -62,6 +66,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[entrypoint] discovery=${DYN_DISCOVERY_BACKEND} file_kv=${DYN_FILE_KV} nats=${NATS_SERVER} event_plane=${DYN_EVENT_PLANE}"
+echo "[entrypoint] mocker engine=${MOCKER_ENGINE_TYPE}"
 echo "[entrypoint] models: ${models[*]}"
 
 nats-server -p 4222 -a 127.0.0.1 &
@@ -78,6 +83,7 @@ pids+=("$!")
 
 # Start compatibility proxy:
 # - strips top-level include_usage for non-stream chat requests
+# - GET /metrics -> synthetic SGLang Prometheus text
 # - transparently forwards all other requests
 PROXY_PORT="${HTTP_PORT}" UPSTREAM_PORT="${UPSTREAM_HTTP_PORT}" \
   python3 /opt/dynamo-mocker-vllm/request_proxy.py &
@@ -92,17 +98,24 @@ if [[ -n "${MOCKER_EXTRA_ARGS:-}" ]]; then
   extra_mocker=( ${MOCKER_EXTRA_ARGS} )
 fi
 
-_lora_admin_port="${MOCKER_MOCK_LORA_ADMIN_PORT_BASE}"
 for m in "${models[@]}"; do
   echo "[entrypoint] starting mocker for ${m}"
-  if [[ "${MOCKER_DYNAMIC_LORA_ADMIN}" == "1" ]]; then
-    export MOCKER_MOCK_LORA_ADMIN_PORT="${_lora_admin_port}"
-    _lora_admin_port=$((_lora_admin_port + 1))
+  # Each OS process must use a distinct dyn endpoint (namespace.component.name); otherwise
+  # both claim dynamo/backend/generate and one worker's run_input exits immediately.
+  mocker_endpoint_args=( )
+  if [[ ${#models[@]} -gt 1 ]]; then
+    _suf="$(_mocker_endpoint_suffix "${m}")"
+    mocker_endpoint_args=( --endpoint "dyn://${MOCKER_NAMESPACE}.backend.generate_${_suf}" )
+    echo "[entrypoint]   -> ${mocker_endpoint_args[*]}"
+  elif [[ -n "${MOCKER_ENDPOINT:-}" ]]; then
+    mocker_endpoint_args=( --endpoint "${MOCKER_ENDPOINT}" )
   fi
   python3 -m dynamo.mocker \
     --discovery-backend "${DYN_DISCOVERY_BACKEND}" \
     --model-path "${m}" \
     --model-name "${m}" \
+    "${mocker_endpoint_args[@]}" \
+    --engine-type "${MOCKER_ENGINE_TYPE}" \
     --speedup-ratio "${MOCK_SPEEDUP}" \
     "${extra_mocker[@]}" &
   pids+=("$!")
@@ -126,4 +139,7 @@ if [[ "${ready}" -ne 1 ]]; then
   exit 1
 fi
 
-wait -n
+# Block until all background jobs finish. Do not use `wait -n`: the first exiting
+# child (e.g. one mocker or transient subprocess) would unblock the script, trigger
+# EXIT cleanup, and tear down NATS/frontend/proxy while others are still healthy.
+wait

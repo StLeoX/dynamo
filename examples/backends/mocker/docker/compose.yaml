@@ -1,29 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Run from repository root:
+# SGLang-style mocker stack (file discovery + NATS). Run from repository root:
 #   docker compose -f examples/backends/mocker/docker/compose.yaml up --build
 #
 # Then:
-#   curl -s localhost:8000/v1/models | jq .
+#   curl -s localhost:30000/v1/models | jq .
+#   curl -s localhost:30000/metrics
 
 services:
-  dynamo-mocker-vllm:
+  dynamo-mocker-sglang:
     build:
       context: ../../../..
       dockerfile: examples/backends/mocker/docker/Dockerfile
       args:
         AI_DYNAMO_VERSION: "${AI_DYNAMO_VERSION:-1.0.1}"
-    image: dynamo-mocker-vllm:local
+        AI_DYNAMO_INSTALL_SOURCE: "${AI_DYNAMO_INSTALL_SOURCE:-1}"
+    image: dynamo-mocker-sglang:local
     ports:
-      - "${HTTP_PORT:-8000}:8000"
+      - "${HTTP_PORT:-30000}:30000"
     environment:
-      HTTP_PORT: "8000"
+      HTTP_PORT: "30000"
       HF_TOKEN: "${HF_TOKEN:-}"
       MOCK_SPEEDUP: "${MOCK_SPEEDUP:-100000}"
       ROUTER_MODE: "${ROUTER_MODE:-round-robin}"
-      # Space-separated HF model ids to mock (default entrypoint uses two DeepSeek distill models).
+      MOCKER_ENGINE_TYPE: "${MOCKER_ENGINE_TYPE:-sglang}"
       MOCKER_MODELS: "${MOCKER_MODELS:-}"
       MOCKER_EXTRA_ARGS: "${MOCKER_EXTRA_ARGS:-}"
-      # Per-model mock LoRA HTTP (load/unload); entrypoint defaults to 1 if unset.
-      MOCKER_DYNAMIC_LORA_ADMIN: "${MOCKER_DYNAMIC_LORA_ADMIN:-1}"

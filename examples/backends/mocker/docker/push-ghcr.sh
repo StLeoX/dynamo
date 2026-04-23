@@ -3,20 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Tag and push the local mocker HTTP image to GitHub Packages (GHCR):
-#   https://github.com/users/faust-benchou/packages?repo_name=dynamo-mocker-vllm
+#   https://github.com/users/faust-benchou/packages?repo_name=dynamo-mocker-sglang
 #
 # Prerequisites:
-#   - Docker image already built (e.g. compose build): default source tag dynamo-mocker-vllm:local
+#   - Docker image already built (e.g. compose build): default source tag dynamo-mocker-sglang:local
 #   - A GitHub Personal Access Token (classic) with scope: write:packages
 #     (and read:packages if the package is private). Fine-grained tokens: "Contents" read
 #     is not enough; use classic PAT or a token with Packages write.
 #
 # Architecture:
-#   By default this script does NOT force linux/amd64. It pushes whatever is already in
-#   SOURCE_IMAGE (on Apple Silicon that is usually linux/arm64 unless you built otherwise).
-#   To build and push an x86_64 image from an ARM64 Mac, set BUILD_PLATFORM before running
-#   (uses docker buildx; single-platform --load is supported):
-#     BUILD_PLATFORM=linux/amd64 ./examples/backends/mocker/docker/push-ghcr.sh
+#   By default this script forces linux/amd64 (x86_64) by rebuilding SOURCE_IMAGE
+#   with docker buildx before push.
+#   To use a different architecture, override BUILD_PLATFORM when running:
+#     BUILD_PLATFORM=linux/arm64 ./examples/backends/mocker/docker/push-ghcr.sh
 #
 # Usage (from repository root):
 #   export GHCR_TOKEN=ghp_xxxx          # or GITHUB_TOKEN if you use a PAT variable name
@@ -25,10 +24,10 @@
 #
 # Environment overrides:
 #   GHCR_OWNER=faust-benchou
-#   GHCR_IMAGE_NAME=dynamo-mocker-vllm
-#   SOURCE_IMAGE=dynamo-mocker-vllm:local
+#   GHCR_IMAGE_NAME=dynamo-mocker-sglang
+#   SOURCE_IMAGE=dynamo-mocker-sglang:local
 #   GHCR_USERNAME=faust-benchou        # login user (usually same as owner for personal accounts)
-#   BUILD_PLATFORM=linux/amd64         # optional: buildx (re)build this arch into SOURCE_IMAGE first
+#   BUILD_PLATFORM=linux/amd64         # default: buildx (re)build this arch into SOURCE_IMAGE first
 #   AI_DYNAMO_VERSION=1.0.1          # optional: PyPI pin when using BUILD_PLATFORM
 
 set -euo pipefail
@@ -38,9 +37,10 @@ cd "${ROOT}"
 
 VERSION="${1:-latest}"
 GHCR_OWNER="${GHCR_OWNER:-faust-benchou}"
-GHCR_IMAGE_NAME="${GHCR_IMAGE_NAME:-dynamo-mocker-vllm}"
-SOURCE_IMAGE="${SOURCE_IMAGE:-dynamo-mocker-vllm:local}"
+GHCR_IMAGE_NAME="${GHCR_IMAGE_NAME:-dynamo-mocker-sglang}"
+SOURCE_IMAGE="${SOURCE_IMAGE:-dynamo-mocker-sglang:local}"
 GHCR_USERNAME="${GHCR_USERNAME:-${GHCR_OWNER}}"
+BUILD_PLATFORM="${BUILD_PLATFORM:-linux/amd64}"
 
 REGISTRY="ghcr.io"
 DEST="${REGISTRY}/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
@@ -58,10 +58,12 @@ if [[ -n "${BUILD_PLATFORM:-}" ]]; then
     exit 1
   fi
   AI_DYNAMO_VERSION="${AI_DYNAMO_VERSION:-1.0.1}"
+  AI_DYNAMO_INSTALL_SOURCE="${AI_DYNAMO_INSTALL_SOURCE:-1}"
   docker buildx build \
     --platform "${BUILD_PLATFORM}" \
     -f examples/backends/mocker/docker/Dockerfile \
     --build-arg "AI_DYNAMO_VERSION=${AI_DYNAMO_VERSION}" \
+    --build-arg "AI_DYNAMO_INSTALL_SOURCE=${AI_DYNAMO_INSTALL_SOURCE}" \
     -t "${SOURCE_IMAGE}" \
     --load \
     "${ROOT}"

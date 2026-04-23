@@ -4,18 +4,15 @@
 
 """Lightweight reverse proxy for mocker image compatibility tweaks.
 
-Current compatibility behavior:
 - For POST /v1/chat/completions requests where JSON body contains `stream: false`,
   remove top-level `include_usage` before forwarding to dynamo.frontend.
-- Mock LoRA admin (``POST /v1/load_lora_adapter``, ``POST /v1/unload_lora_adapter``)
-  is forwarded to ``UPSTREAM_HOST`` on ``_MOCK_LORA_MERGED_UPSTREAM_PORT`` (default
-  ``8002``, the second worker with default ``MOCKER_MOCK_LORA_ADMIN_PORT_BASE=8001``).
-  There is no per-request switch; use the first worker’s admin only by changing that
-  constant or hitting port 8001 inside the container.
+- GET /metrics returns synthetic SGLang-style Prometheus text for models listed in
+  ``MOCKER_METRICS_MODELS`` (space-separated), without opening a second listen port.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from http import client
@@ -23,23 +20,72 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 LISTEN_HOST = os.environ.get("PROXY_HOST", "0.0.0.0")
-LISTEN_PORT = int(os.environ.get("PROXY_PORT", "8000"))
+LISTEN_PORT = int(os.environ.get("PROXY_PORT", "30000"))
 UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "127.0.0.1")
 UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "18000"))
-
-# Second mocker worker’s in-container mock LoRA HTTP (see entrypoint: base + 1).
-_MOCK_LORA_MERGED_UPSTREAM_PORT = 8002
-_LORA_ADMIN_PATHS = frozenset({"/v1/load_lora_adapter", "/v1/unload_lora_adapter"})
 
 
 def _path_without_query(path: str) -> str:
     return path.split("?", 1)[0]
 
 
-def _upstream_port_for_request(path: str) -> int:
-    if _path_without_query(path) in _LORA_ADMIN_PATHS:
-        return _MOCK_LORA_MERGED_UPSTREAM_PORT
-    return UPSTREAM_PORT
+def _metrics_model_names() -> list[str]:
+    raw = os.environ.get("MOCKER_METRICS_MODELS", "").strip()
+    if not raw:
+        return ["mock-model"]
+    return raw.split()
+
+
+def _escape_prometheus_label_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _stable_int(seed: str, mod: int) -> int:
+    h = int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12], 16)
+    return h % mod if mod else 0
+
+
+def _metrics_body_for_model(model_name: str) -> str:
+    """SGLang-style histogram/gauge snippet (one model)."""
+    m = _escape_prometheus_label_value(model_name)
+    seed = model_name
+    token_usage = 0.12 + (_stable_int(seed + ":tu", 7800) / 10000.0)
+    token_usage = min(max(token_usage, 0.0), 1.0)
+    num_queue_reqs = _stable_int(seed + ":q", 6)
+    ttft_count = 80 + _stable_int(seed + ":tc", 900)
+    ttft_sum = round(0.02 * ttft_count + _stable_int(seed + ":ts", 100) / 1000.0, 6)
+    tpot_count = 120 + _stable_int(seed + ":pc", 800)
+    tpot_sum = round(0.015 * tpot_count + _stable_int(seed + ":ps", 100) / 1000.0, 6)
+    ttft_b08 = int(ttft_count * 0.3)
+    tpot_b005 = int(tpot_count * 0.5)
+    return f"""# HELP sglang:token_usage KV cache utilization ratio (0.0-1.0)
+# TYPE sglang:token_usage gauge
+sglang:token_usage{{model_name="{m}"}} {token_usage}
+# HELP sglang:num_queue_reqs Number of requests waiting in queue
+# TYPE sglang:num_queue_reqs gauge
+sglang:num_queue_reqs{{model_name="{m}"}} {num_queue_reqs}
+# HELP sglang:time_to_first_token_seconds Histogram of time to first token in seconds
+# TYPE sglang:time_to_first_token_seconds histogram
+sglang:time_to_first_token_seconds_bucket{{le="0.001",model_name="{m}"}} 0
+sglang:time_to_first_token_seconds_bucket{{le="0.005",model_name="{m}"}} 0
+sglang:time_to_first_token_seconds_bucket{{le="0.08",model_name="{m}"}} {ttft_b08}
+sglang:time_to_first_token_seconds_bucket{{le="+Inf",model_name="{m}"}} {ttft_count}
+sglang:time_to_first_token_seconds_sum{{model_name="{m}"}} {ttft_sum}
+sglang:time_to_first_token_seconds_count{{model_name="{m}"}} {ttft_count}
+# HELP sglang:time_per_output_token_seconds Histogram of time per output token in seconds
+# TYPE sglang:time_per_output_token_seconds histogram
+sglang:time_per_output_token_seconds_bucket{{le="0.001",model_name="{m}"}} 0
+sglang:time_per_output_token_seconds_bucket{{le="0.005",model_name="{m}"}} {tpot_b005}
+sglang:time_per_output_token_seconds_bucket{{le="0.08",model_name="{m}"}} {tpot_count}
+sglang:time_per_output_token_seconds_bucket{{le="+Inf",model_name="{m}"}} {tpot_count}
+sglang:time_per_output_token_seconds_sum{{model_name="{m}"}} {tpot_sum}
+sglang:time_per_output_token_seconds_count{{model_name="{m}"}} {tpot_count}
+"""
+
+
+def render_sglang_metrics_text() -> str:
+    parts = [_metrics_body_for_model(name) for name in _metrics_model_names()]
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def _strip_include_usage(path: str, body: bytes, content_type: str) -> tuple[bytes, bool]:
@@ -66,6 +112,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
 
+    def _serve_metrics(self) -> None:
+        body = render_sglang_metrics_text().encode("utf-8")
+        self.send_response(200, "OK")
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _proxy(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(content_length) if content_length > 0 else b""
@@ -76,8 +130,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}
         headers["Content-Length"] = str(len(request_body))
 
-        port = _upstream_port_for_request(self.path)
-        conn = client.HTTPConnection(UPSTREAM_HOST, port, timeout=120)
+        conn = client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=120)
         try:
             conn.request(
                 self.command,
@@ -106,6 +159,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def do_GET(self) -> None:  # noqa: N802
+        if _path_without_query(self.path) == "/metrics":
+            self._serve_metrics()
+            return
         self._proxy()
 
     def do_POST(self) -> None:  # noqa: N802

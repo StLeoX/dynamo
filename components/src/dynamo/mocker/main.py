@@ -25,11 +25,6 @@ from .config import (
     build_runtime_config,
     load_mocker_engine_args,
 )
-from .mock_lora_http import (
-    mock_lora_admin_host,
-    mock_lora_admin_port_for_worker,
-    start_mock_lora_admin_http,
-)
 from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
@@ -166,7 +161,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
 
-        runtime, loop = create_runtime(
+        runtime, _ = create_runtime(
             args.discovery_backend,
             args.request_plane,
             args.event_plane,
@@ -196,20 +191,6 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             worker_engine_args = base_engine_args
 
         kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
-
-        admin_port = mock_lora_admin_port_for_worker(worker_id)
-        if admin_port is not None:
-            start_mock_lora_admin_http(
-                loop=loop,
-                runtime=runtime,
-                endpoint_dyn=args.endpoint,
-                base_model_path=args.model_path,
-                kv_cache_block_size=kv_cache_block_size or 64,
-                runtime_config=runtime_config,
-                is_prefill=args.is_prefill_worker,
-                host=mock_lora_admin_host(),
-                port=admin_port,
-            )
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
@@ -249,8 +230,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtimes))
 
+    event_loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+        event_loop.add_signal_handler(sig, signal_handler)
 
     logger.info("Signal handlers set up for graceful shutdown")
 
