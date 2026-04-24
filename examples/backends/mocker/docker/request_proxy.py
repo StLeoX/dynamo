@@ -45,9 +45,8 @@ def _stable_int(seed: str, mod: int) -> int:
     return h % mod if mod else 0
 
 
-def _metrics_body_for_model(model_name: str) -> str:
-    """SGLang-style histogram/gauge snippet (one model)."""
-    m = _escape_prometheus_label_value(model_name)
+def _metrics_values_for_model(model_name: str) -> dict[str, float | int]:
+    """Synthetic values for one model (used to build valid single-family Prometheus text)."""
     seed = model_name
     token_usage = 0.12 + (_stable_int(seed + ":tu", 7800) / 10000.0)
     token_usage = min(max(token_usage, 0.0), 1.0)
@@ -58,34 +57,65 @@ def _metrics_body_for_model(model_name: str) -> str:
     tpot_sum = round(0.015 * tpot_count + _stable_int(seed + ":ps", 100) / 1000.0, 6)
     ttft_b08 = int(ttft_count * 0.3)
     tpot_b005 = int(tpot_count * 0.5)
-    return f"""# HELP sglang:token_usage KV cache utilization ratio (0.0-1.0)
-# TYPE sglang:token_usage gauge
-sglang:token_usage{{model_name="{m}"}} {token_usage}
-# HELP sglang:num_queue_reqs Number of requests waiting in queue
-# TYPE sglang:num_queue_reqs gauge
-sglang:num_queue_reqs{{model_name="{m}"}} {num_queue_reqs}
-# HELP sglang:time_to_first_token_seconds Histogram of time to first token in seconds
-# TYPE sglang:time_to_first_token_seconds histogram
-sglang:time_to_first_token_seconds_bucket{{le="0.001",model_name="{m}"}} 0
-sglang:time_to_first_token_seconds_bucket{{le="0.005",model_name="{m}"}} 0
-sglang:time_to_first_token_seconds_bucket{{le="0.08",model_name="{m}"}} {ttft_b08}
-sglang:time_to_first_token_seconds_bucket{{le="+Inf",model_name="{m}"}} {ttft_count}
-sglang:time_to_first_token_seconds_sum{{model_name="{m}"}} {ttft_sum}
-sglang:time_to_first_token_seconds_count{{model_name="{m}"}} {ttft_count}
-# HELP sglang:time_per_output_token_seconds Histogram of time per output token in seconds
-# TYPE sglang:time_per_output_token_seconds histogram
-sglang:time_per_output_token_seconds_bucket{{le="0.001",model_name="{m}"}} 0
-sglang:time_per_output_token_seconds_bucket{{le="0.005",model_name="{m}"}} {tpot_b005}
-sglang:time_per_output_token_seconds_bucket{{le="0.08",model_name="{m}"}} {tpot_count}
-sglang:time_per_output_token_seconds_bucket{{le="+Inf",model_name="{m}"}} {tpot_count}
-sglang:time_per_output_token_seconds_sum{{model_name="{m}"}} {tpot_sum}
-sglang:time_per_output_token_seconds_count{{model_name="{m}"}} {tpot_count}
-"""
+    return {
+        "token_usage": token_usage,
+        "num_queue_reqs": num_queue_reqs,
+        "ttft_count": ttft_count,
+        "ttft_sum": ttft_sum,
+        "ttft_b08": ttft_b08,
+        "tpot_count": tpot_count,
+        "tpot_sum": tpot_sum,
+        "tpot_b005": tpot_b005,
+    }
 
 
 def render_sglang_metrics_text() -> str:
-    parts = [_metrics_body_for_model(name) for name in _metrics_model_names()]
-    return "\n".join(parts).rstrip() + "\n"
+    """One HELP/TYPE per metric name; multiple models => multiple samples (Prometheus text rules)."""
+    models = _metrics_model_names()
+    per_model = [(n, _escape_prometheus_label_value(n), _metrics_values_for_model(n)) for n in models]
+    lines: list[str] = []
+
+    lines.append("# HELP sglang:token_usage KV cache utilization ratio (0.0-1.0)")
+    lines.append("# TYPE sglang:token_usage gauge")
+    for _name, m, v in per_model:
+        lines.append(f'sglang:token_usage{{model_name="{m}"}} {v["token_usage"]}')
+
+    lines.append("# HELP sglang:num_queue_reqs Number of requests waiting in queue")
+    lines.append("# TYPE sglang:num_queue_reqs gauge")
+    for _name, m, v in per_model:
+        lines.append(f'sglang:num_queue_reqs{{model_name="{m}"}} {v["num_queue_reqs"]}')
+
+    lines.append("# HELP sglang:time_to_first_token_seconds Histogram of time to first token in seconds")
+    lines.append("# TYPE sglang:time_to_first_token_seconds histogram")
+    for _name, m, v in per_model:
+        lines.append(f'sglang:time_to_first_token_seconds_bucket{{le="0.001",model_name="{m}"}} 0')
+        lines.append(f'sglang:time_to_first_token_seconds_bucket{{le="0.005",model_name="{m}"}} 0')
+        lines.append(
+            f'sglang:time_to_first_token_seconds_bucket{{le="0.08",model_name="{m}"}} {v["ttft_b08"]}'
+        )
+        lines.append(
+            f'sglang:time_to_first_token_seconds_bucket{{le="+Inf",model_name="{m}"}} {v["ttft_count"]}'
+        )
+        lines.append(f'sglang:time_to_first_token_seconds_sum{{model_name="{m}"}} {v["ttft_sum"]}')
+        lines.append(f'sglang:time_to_first_token_seconds_count{{model_name="{m}"}} {v["ttft_count"]}')
+
+    lines.append("# HELP sglang:time_per_output_token_seconds Histogram of time per output token in seconds")
+    lines.append("# TYPE sglang:time_per_output_token_seconds histogram")
+    for _name, m, v in per_model:
+        lines.append(f'sglang:time_per_output_token_seconds_bucket{{le="0.001",model_name="{m}"}} 0')
+        lines.append(
+            f'sglang:time_per_output_token_seconds_bucket{{le="0.005",model_name="{m}"}} {v["tpot_b005"]}'
+        )
+        lines.append(
+            f'sglang:time_per_output_token_seconds_bucket{{le="0.08",model_name="{m}"}} {v["tpot_count"]}'
+        )
+        lines.append(
+            f'sglang:time_per_output_token_seconds_bucket{{le="+Inf",model_name="{m}"}} {v["tpot_count"]}'
+        )
+        lines.append(f'sglang:time_per_output_token_seconds_sum{{model_name="{m}"}} {v["tpot_sum"]}')
+        lines.append(f'sglang:time_per_output_token_seconds_count{{model_name="{m}"}} {v["tpot_count"]}')
+
+    return "\n".join(lines) + "\n"
 
 
 def _strip_include_usage(path: str, body: bytes, content_type: str) -> tuple[bytes, bool]:
