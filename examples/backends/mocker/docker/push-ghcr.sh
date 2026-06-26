@@ -12,9 +12,13 @@
 #     is not enough; use classic PAT or a token with Packages write.
 #
 # Architecture:
-#   By default this script forces linux/amd64 (x86_64) by rebuilding SOURCE_IMAGE
-#   with docker buildx before push.
-#   To use a different architecture, override BUILD_PLATFORM when running:
+#   By default this script builds for linux/arm64 on Apple Silicon and linux/amd64
+#   on x86_64 hosts, using docker buildx with --load for the single platform.
+#   To push a multi-platform manifest (both amd64 + arm64), set BUILD_PLATFORM
+#   explicitly — the script will use --push and skip --load:
+#     BUILD_PLATFORM=linux/amd64,linux/arm64 ./examples/backends/mocker/docker/push-ghcr.sh
+#   To force a specific single platform, override BUILD_PLATFORM:
+#     BUILD_PLATFORM=linux/amd64 ./examples/backends/mocker/docker/push-ghcr.sh
 #     BUILD_PLATFORM=linux/arm64 ./examples/backends/mocker/docker/push-ghcr.sh
 #
 # Usage (from repository root):
@@ -40,7 +44,22 @@ GHCR_OWNER="${GHCR_OWNER:-faust-benchou}"
 GHCR_IMAGE_NAME="${GHCR_IMAGE_NAME:-dynamo-mocker-sglang}"
 SOURCE_IMAGE="${SOURCE_IMAGE:-dynamo-mocker-sglang:local}"
 GHCR_USERNAME="${GHCR_USERNAME:-${GHCR_OWNER}}"
-BUILD_PLATFORM="${BUILD_PLATFORM:-linux/amd64}"
+
+# Auto-detect host arch when BUILD_PLATFORM is unset:
+# Apple Silicon → linux/arm64, x86_64 → linux/amd64
+if [[ -z "${BUILD_PLATFORM:-}" ]]; then
+  _host_arch="$(uname -m)"
+  case "${_host_arch}" in
+    arm64|aarch64) BUILD_PLATFORM="linux/arm64" ;;
+    *)             BUILD_PLATFORM="linux/amd64" ;;
+  esac
+fi
+
+# Multi-platform → must use --push directly; single-platform → build with --load, then tag+push
+_is_multi="false"
+if [[ "${BUILD_PLATFORM}" == *","* ]]; then
+  _is_multi="true"
+fi
 
 REGISTRY="ghcr.io"
 DEST="${REGISTRY}/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
@@ -51,44 +70,49 @@ if [[ -z "${TOKEN}" ]]; then
   exit 1
 fi
 
-if [[ -n "${BUILD_PLATFORM:-}" ]]; then
-  echo "[push-ghcr] buildx --platform ${BUILD_PLATFORM} -> ${SOURCE_IMAGE}"
-  if ! docker buildx version >/dev/null 2>&1; then
-    echo "error: docker buildx is required when BUILD_PLATFORM is set" >&2
-    exit 1
-  fi
-  AI_DYNAMO_VERSION="${AI_DYNAMO_VERSION:-1.0.1}"
-  AI_DYNAMO_INSTALL_SOURCE="${AI_DYNAMO_INSTALL_SOURCE:-1}"
-  docker buildx build \
-    --platform "${BUILD_PLATFORM}" \
-    -f examples/backends/mocker/docker/Dockerfile \
-    --build-arg "AI_DYNAMO_VERSION=${AI_DYNAMO_VERSION}" \
-    --build-arg "AI_DYNAMO_INSTALL_SOURCE=${AI_DYNAMO_INSTALL_SOURCE}" \
-    -t "${SOURCE_IMAGE}" \
-    --load \
-    "${ROOT}"
-fi
-
-if ! docker image inspect "${SOURCE_IMAGE}" >/dev/null 2>&1; then
-  echo "error: source image not found: ${SOURCE_IMAGE}" >&2
-  echo "  build first, e.g.:" >&2
-  echo "  docker compose -f examples/backends/mocker/docker/compose.yaml build" >&2
-  echo "  or: BUILD_PLATFORM=linux/amd64 $0 ..." >&2
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "error: docker buildx is required" >&2
   exit 1
 fi
 
-_arch="$(docker image inspect -f '{{.Architecture}}' "${SOURCE_IMAGE}" 2>/dev/null || echo "?")"
-_os="$(docker image inspect -f '{{.Os}}' "${SOURCE_IMAGE}" 2>/dev/null || echo "?")"
-echo "[push-ghcr] source image OS/Arch: ${_os}/${_arch}"
+AI_DYNAMO_VERSION="${AI_DYNAMO_VERSION:-1.0.1}"
+AI_DYNAMO_INSTALL_SOURCE="${AI_DYNAMO_INSTALL_SOURCE:-1}"
 
-echo "[push-ghcr] logging in to ${REGISTRY} as ${GHCR_USERNAME}"
-printf '%s' "${TOKEN}" | docker login "${REGISTRY}" -u "${GHCR_USERNAME}" --password-stdin
+BUILDX_BASE=(
+  --platform "${BUILD_PLATFORM}"
+  -f examples/backends/mocker/docker/Dockerfile
+  --build-arg "AI_DYNAMO_VERSION=${AI_DYNAMO_VERSION}"
+  --build-arg "AI_DYNAMO_INSTALL_SOURCE=${AI_DYNAMO_INSTALL_SOURCE}"
+)
 
-echo "[push-ghcr] tagging ${SOURCE_IMAGE} -> ${DEST}"
-docker tag "${SOURCE_IMAGE}" "${DEST}"
+if [[ "${_is_multi}" == "true" ]]; then
+  echo "[push-ghcr] multi-platform buildx + push -> ${DEST} (platforms: ${BUILD_PLATFORM})"
+  docker buildx build \
+    "${BUILDX_BASE[@]}" \
+    -t "${DEST}" \
+    --push \
+    "${ROOT}"
+else
+  echo "[push-ghcr] buildx --platform ${BUILD_PLATFORM} -> ${SOURCE_IMAGE}"
+  docker buildx build \
+    "${BUILDX_BASE[@]}" \
+    -t "${SOURCE_IMAGE}" \
+    --load \
+    "${ROOT}"
 
-echo "[push-ghcr] pushing ${DEST}"
-docker push "${DEST}"
+  _arch="$(docker image inspect -f '{{.Architecture}}' "${SOURCE_IMAGE}" 2>/dev/null || echo "?")"
+  _os="$(docker image inspect -f '{{.Os}}' "${SOURCE_IMAGE}" 2>/dev/null || echo "?")"
+  echo "[push-ghcr] source image OS/Arch: ${_os}/${_arch}"
+
+  echo "[push-ghcr] logging in to ${REGISTRY} as ${GHCR_USERNAME}"
+  printf '%s' "${TOKEN}" | docker login "${REGISTRY}" -u "${GHCR_USERNAME}" --password-stdin
+
+  echo "[push-ghcr] tagging ${SOURCE_IMAGE} -> ${DEST}"
+  docker tag "${SOURCE_IMAGE}" "${DEST}"
+
+  echo "[push-ghcr] pushing ${DEST}"
+  docker push "${DEST}"
+fi
 
 echo "[push-ghcr] done. Pull with:"
 echo "  docker pull ${DEST}"
