@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Push Mocker SGLang to GHCR (multi-platform source build)
+name: Push Mocker SGLang to GHCR (multi-platform native build)
 
 on:
   workflow_dispatch:
     inputs:
       ghcr_owner:
-        description: "GHCR owner (user/org), e.g. faust-benchou"
+        description: "GHCR owner (user/org), e.g. stleox"
         required: true
         type: string
       image_name:
@@ -16,7 +16,7 @@ on:
         default: "dynamo-mocker-sglang"
         type: string
       image_tag:
-        description: "Image tag, e.g. 2026-04-23"
+        description: "Image tag, e.g. v2026-04-23"
         required: true
         type: string
       ai_dynamo_version:
@@ -30,22 +30,29 @@ permissions:
   packages: write
 
 jobs:
-  build-and-push:
-    name: Build and push multi-platform
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            tag_suffix: linux-amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            tag_suffix: linux-arm64
+    runs-on: ${{ matrix.runner }}
     env:
-      BUILD_PLATFORM: linux/amd64,linux/arm64
       AI_DYNAMO_INSTALL_SOURCE: "1"
       GHCR_OWNER: ${{ inputs.ghcr_owner }}
       GHCR_IMAGE_NAME: ${{ inputs.image_name }}
       VERSION: ${{ inputs.image_tag }}
       AI_DYNAMO_VERSION: ${{ inputs.ai_dynamo_version }}
+      PLATFORM: ${{ matrix.platform }}
+      TAG_SUFFIX: ${{ matrix.tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up QEMU for multi-platform emulation
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -61,14 +68,12 @@ jobs:
             REPO_ROOT="dynamo"
           else
             echo "Cannot find examples/backends/mocker/docker/Dockerfile in workspace." >&2
-            echo "Workspace tree (top level):" >&2
             ls -la >&2
             exit 1
           fi
-          DEST="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
+          PLATFORM_TAG="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}-${TAG_SUFFIX}"
           echo "repo_root=${REPO_ROOT}" >> "$GITHUB_OUTPUT"
-          echo "dest=${DEST}" >> "$GITHUB_OUTPUT"
-          echo "build_platform=${BUILD_PLATFORM}" >> "$GITHUB_OUTPUT"
+          echo "platform_tag=${PLATFORM_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         shell: bash
@@ -84,26 +89,74 @@ jobs:
           fi
           printf '%s' "${TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build and push multi-platform image
+      - name: Build and push single-platform image
         shell: bash
         run: |
           set -euo pipefail
           docker buildx build \
-            --platform "${{ steps.prep.outputs.build_platform }}" \
+            --platform "${PLATFORM}" \
             -f "${{ steps.prep.outputs.repo_root }}/examples/backends/mocker/docker/Dockerfile" \
             --build-arg "AI_DYNAMO_VERSION=${AI_DYNAMO_VERSION}" \
             --build-arg "AI_DYNAMO_INSTALL_SOURCE=${AI_DYNAMO_INSTALL_SOURCE}" \
-            -t "${{ steps.prep.outputs.dest }}" \
+            -t "${{ steps.prep.outputs.platform_tag }}" \
             --push \
             "${{ steps.prep.outputs.repo_root }}"
+
+      - name: Report
+        shell: bash
+        run: |
+          echo "### ${{ matrix.platform }} image pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ steps.prep.outputs.platform_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  merge:
+    name: Merge into multi-platform manifest
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      GHCR_OWNER: ${{ inputs.ghcr_owner }}
+      GHCR_IMAGE_NAME: ${{ inputs.image_name }}
+      VERSION: ${{ inputs.image_tag }}
+    steps:
+      - name: Login to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TOKEN="${GHCR_TOKEN:-$GITHUB_TOKEN}"
+          if [[ -z "${TOKEN}" ]]; then
+            echo "No token available for GHCR login." >&2
+            exit 1
+          fi
+          printf '%s' "${TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Create multi-platform manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          FINAL="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
+          AMD64="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}-linux-amd64"
+          ARM64="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}-linux-arm64"
+
+          echo "Creating multi-platform manifest: ${FINAL}"
+          docker buildx imagetools create \
+            -t "${FINAL}" \
+            "${AMD64}" \
+            "${ARM64}"
+
+          echo "Pushed: ${FINAL}"
 
       - name: Publish summary
         shell: bash
         run: |
+          FINAL="ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_NAME}:${VERSION}"
           {
             echo "### GHCR Multi-Platform Image Published"
             echo ""
-            echo "- Platforms: \`${{ steps.prep.outputs.build_platform }}\`"
-            echo "- Source install: \`${AI_DYNAMO_INSTALL_SOURCE}\`"
-            echo "- Pushed image: \`${{ steps.prep.outputs.dest }}\`"
+            echo "- Platform tags (internal):"
+            echo "  - \`${FINAL}-linux-amd64\`"
+            echo "  - \`${FINAL}-linux-arm64\`"
+            echo "- Merged manifest: \`${FINAL}\`"
+            echo "- Pull any platform: \`docker pull ${FINAL}\`"
           } >> "$GITHUB_STEP_SUMMARY"
